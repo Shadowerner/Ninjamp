@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Ninjamp</title>
+    <style>
+        body {
+            margin: 0; padding: 0; background-color: #1a252f;
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; color: white; overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            background-color: #2c3e50;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            image-rendering: pixelated; image-rendering: crisp-edges;
+            border: 4px solid #0f171e; border-radius: 8px;
+        }
+        #loading {
+            position: absolute;
+            font-size: 24px;
+            font-weight: bold;
+            color: #00BCD4;
+            text-shadow: 2px 2px 0 #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Chargement des assets depuis GitHub...</div>
+    <canvas id="gameCanvas" style="display: none;"></canvas>
+
+<script>
+// ==========================================
+// 1. CONFIGURATION & CHARGEMENT DES ASSETS
+// ==========================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = 960;
+canvas.height = 540;
+ctx.imageSmoothingEnabled = false;
+
+const GRAVITY = 0.6;
+const JUMP_FORCE = -12;
+
+// --- URL DE BASE DE TON DÉPÔT GITHUB ---
+// Le %20 remplace les espaces dans les noms de fichiers (ex: "Main Characters")
+const BASE_URL = "https://raw.githubusercontent.com/Shadowerner/Ninjamp/assets/";
+
+// --- LISTE DES ASSETS À CHARGER ---
+// J'ai adapté les chemins exacts selon tes captures d'écran
+const ASSETS_TO_LOAD = {
+    // Personnage (Animations)
+    playerIdle: "Main%20Characters/Ninja%20Frog/Idle%20(32x32).png",
+    playerRun: "Main%20Characters/Ninja%20Frog/Run%20(32x32).png",
+    playerJump: "Main%20Characters/Ninja%20Frog/Jump%20(32x32).png",
+    playerFall: "Main%20Characters/Ninja%20Frog/Fall%20(32x32).png",
+    
+    // Items
+    fruit: "Items/Fruits/Apple.png", // Si le fichier s'appelle autrement, change-le ici
+    box: "Items/Boxes/Box1/Idle.png",
+    boxBreak: "Items/Boxes/Box1/Break.png",
+    
+    // Terrain (16x16)
+    tile: "Terrain/Terrain%20(16x16).png",
+    
+    // Menus / UI
+    skull: "Menu/Buttons/Close.png", // J'utilise l'icône Close pour le game over par exemple
+    flag: "Items/Checkpoints/Checkpoint/Checkpoint%20(Flag)/Checkpoint%20(Flag)%20(Idle).png" // À vérifier
+};
+
+// Chargement dynamique des boutons de niveaux (01.png à 50.png)
+for (let i = 1; i <= 50; i++) {
+    let num = i < 10 ? "0" + i : i;
+    ASSETS_TO_LOAD[`btnLevel${i}`] = `Menu/Levels/${num}.png`;
+}
+
+const assets = {};
+let assetsLoaded = 0;
+const totalAssets = Object.keys(ASSETS_TO_LOAD).length;
+
+for (let key in ASSETS_TO_LOAD) {
+    assets[key] = new Image();
+    assets[key].crossOrigin = "Anonymous";
+    assets[key].src = BASE_URL + ASSETS_TO_LOAD[key];
+    
+    assets[key].onload = () => {
+        assetsLoaded++;
+        if (assetsLoaded === totalAssets) {
+            document.getElementById('loading').style.display = 'none';
+            canvas.style.display = 'block';
+            startGame();
+        }
+    };
+    
+    assets[key].onerror = () => {
+        console.warn(`Asset introuvable : ${ASSETS_TO_LOAD[key]}`);
+        assetsLoaded++;
+        if (assetsLoaded === totalAssets) {
+            document.getElementById('loading').style.display = 'none';
+            canvas.style.display = 'block';
+            startGame();
+        }
+    };
+}
+
+// ==========================================
+// 2. VARIABLES GLOBALES & ANIMATIONS
+// ==========================================
+let gameState = 'menu'; 
+let unlockedLevel = parseInt(localStorage.getItem('ninjamp_unlocked')) || 1;
+let currentLevel = 1;
+
+const player = {
+    x: 100, y: 100, w: 24, h: 24, vx: 0, vy: 0,
+    isGrounded: false, jumps: 2, maxJumps: 2,
+    isWallSliding: false, wallDir: 0,
+    coyoteTimer: 0, jumpBufferTimer: 0,
+    facing: 1, invincible: 0,
+    // Animation
+    animTimer: 0,
+    animFrame: 0,
+    currentAnim: 'idle'
+};
+
+let platforms = [], fruits = [], boxes = [], particles = [];
+let finishPoint = null, lavaY = 800;
+let camera = { x: 0, y: 0 };
+let keys = {};
+let time = 0;
+let totalFruits = 0;
+
+// ==========================================
+// 3. LOGIQUE DU JEU
+// ==========================================
+function generateLevel(levelNum) {
+    platforms = []; fruits = []; boxes = []; particles = []; time = 0;
+    gameState = 'playing';
+    
+    const numPlatforms = 5 + Math.floor(levelNum / 2);
+    lavaY = 800 + (levelNum * 100);
+
+    // Sol de départ (16x16 par défaut)
+    platforms.push({ x: 0, y: 600, w: 320, h: 160, type: 'tile' });
+    let lastX = 150, lastY = 600;
+
+    for (let i = 0; i < numPlatforms; i++) {
+        lastY -= 100 + Math.random() * 50; 
+        lastX = 50 + Math.random() * 600;
+        const platW = 100 + Math.random() * 100;
+        platforms.push({ x: lastX, y: lastY, w: platW, h: 32, type: 'tile' });
+
+        if (Math.random() > 0.3) fruits.push({ x: lastX + platW/2, y: lastY - 20, w: 16, h: 16, collected: false });
+        if (Math.random() > 0.5 && levelNum > 2) boxes.push({ x: lastX + platW/2 - 16, y: lastY - 32, w: 32, h: 32, broken: false });
+    }
+
+    finishPoint = { x: lastX + 50, y: lastY - 64, w: 32, h: 32 };
+    player.x = 50; player.y = 500; player.vx = 0; player.vy = 0;
+    player.jumps = player.maxJumps;
+    player.invincible = 60;
+}
+
+let lastTime = 0;
+function gameLoop(timestamp) {
+    const dt = timestamp - lastTime;
+    lastTime = timestamp;
+    update(dt);
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function startGame() {
+    requestAnimationFrame(gameLoop);
+}
+
+function update(dt) {
+    if (gameState === 'menu') {
+        if (keys['Enter']) { gameState = 'levelSelect'; keys['Enter'] = false; }
+        return;
+    }
+    
+    if (gameState === 'levelSelect') {
+        if (keys['ArrowRight']) { if (currentLevel < 50) currentLevel++; keys['ArrowRight'] = false; }
+        if (keys['ArrowLeft']) { if (currentLevel > 1) currentLevel--; keys['ArrowLeft'] = false; }
+        if (keys['Enter']) {
+            if (currentLevel <= unlockedLevel) generateLevel(currentLevel);
+            keys['Enter'] = false;
+        }
+        return;
+    }
+
+    if (gameState === 'playing') {
+        time += dt;
+        player.animTimer += dt;
+        
+        const moveSpeed = 0.8;
+        let moving = false;
+
+        if (keys['ArrowLeft'] || keys['q'] || keys['a']) { player.vx -= moveSpeed; player.facing = -1; moving = true; }
+        if (keys['ArrowRight'] || keys['d']) { player.vx += moveSpeed; player.facing = 1; moving = true; }
+        
+        if (player.isGrounded) player.vx *= 0.8; else player.vx *= 0.95;
+        if (player.vx > 5) player.vx = 5; if (player.vx < -5) player.vx = -5;
+
+        if (player.isGrounded) player.coyoteTimer = 10; else if (player.coyoteTimer > 0) player.coyoteTimer--;
+        if (player.isWallSliding) { player.vy = Math.min(player.vy, 2); player.jumps = player.maxJumps; }
+        
+        if (keys[' '] || keys['ArrowUp'] || keys['w'] || keys['z']) player.jumpBufferTimer = 10; else if (player.jumpBufferTimer > 0) player.jumpBufferTimer--;
+
+        if (player.jumpBufferTimer > 0 && (player.coyoteTimer > 0 || player.jumps > 0 || player.isWallSliding)) {
+            player.vy = JUMP_FORCE; player.jumpBufferTimer = 0; player.coyoteTimer = 0;
+            if (player.isWallSliding) { player.vx = player.wallDir * 6; player.jumps = player.maxJumps - 1; } 
+            else player.jumps--;
+        }
+
+        player.vy += GRAVITY;
+        player.x += player.vx;
+        player.y += player.vy;
+
+        // --- GESTION DES ANIMATIONS ---
+        if (!player.isGrounded) {
+            player.currentAnim = player.vy < 0 ? 'jump' : 'fall';
+        } else if (moving && Math.abs(player.vx) > 0.5) {
+            player.currentAnim = 'run';
+        } else {
+            player.currentAnim = 'idle';
+        }
+
+        // Vitesse des animations (en ms par frame)
+        const animSpeeds = { idle: 150, run: 80, jump: 100, fall: 100 };
+        if (player.animTimer > animSpeeds[player.currentAnim]) {
+            player.animTimer = 0;
+            player.animFrame++;
+            // On boucle les animations (on suppose 4 à 12 frames par sprite, le moteur s'adapte)
+            if (player.animFrame > 11) player.animFrame = 0; 
+        }
+
+        // Physique de collision (reste inchangé)
+        player.isGrounded = false; player.isWallSliding = false; player.wallDir = 0;
+        for (let plat of platforms) {
+            if (player.x < plat.x + plat.w && player.x + player.w > plat.x) {
+                if (player.vy > 0 && player.y + player.h > plat.y && player.y + player.h < plat.y + plat.h + 10) {
+                    player.y = plat.y - player.h; player.vy = 0; player.isGrounded = true; player.jumps = player.maxJumps;
+                } else if (player.vy < 0 && player.y < plat.y + plat.h && player.y > plat.y) {
+                    player.y = plat.y + plat.h; player.vy = 0;
+                }
+            }
+            if (player.y < plat.y + plat.h && player.y + player.h > plat.y) {
+                if (player.vx > 0 && player.x + player.w > plat.x && player.x < plat.x) {
+                    player.x = plat.x - player.w; player.vx = 0; if (!player.isGrounded) { player.isWallSliding = true; player.wallDir = -1; }
+                } else if (player.vx < 0 && player.x < plat.x + plat.w && player.x + player.w > plat.x + plat.w) {
+                    player.x = plat.x + plat.w; player.vx = 0; if (!player.isGrounded) { player.isWallSliding = true; player.wallDir = 1; }
+                }
+            }
+        }
+
+        for (let box of boxes) {
+            if (box.broken) continue;
+            if (player.x < box.x + box.w && player.x + player.w > box.x) {
+                if (player.vy > 0 && player.y + player.h > box.y && player.y + player.h < box.y + box.h + 10) {
+                    player.y = box.y - player.h; player.vy = 0; player.isGrounded = true; player.jumps = player.maxJumps;
+                }
+                if (player.vy > 0 && player.y + player.h > box.y && player.y < box.y + box.h/2) {
+                    box.broken = true; createParticles(box.x + 16, box.y + 16, '#8D6E63');
+                    const numFruits = Math.floor(Math.random() * 5) + 1;
+                    for (let i = 0; i < numFruits; i++) fruits.push({ x: box.x + Math.random() * 20, y: box.y + Math.random() * 20, w: 16, h: 16, collected: false });
+                }
+            }
+        }
+
+        for (let f of fruits) {
+            if (!f.collected && player.x < f.x + f.w && player.x + player.w > f.x && player.y < f.y + f.h && player.y + player.h > f.y) {
+                f.collected = true; totalFruits++; createParticles(f.x + 6, f.y + 6, '#FFEB3B');
+            }
+        }
+
+        if (player.x < finishPoint.x + finishPoint.w && player.x + player.w > finishPoint.x && player.y < finishPoint.y + finishPoint.h && player.y + player.h > finishPoint.y) {
+            gameState = 'win';
+            if (currentLevel === unlockedLevel && currentLevel < 50) {
+                unlockedLevel++;
+                localStorage.setItem('ninjamp_unlocked', unlockedLevel);
+            }
+        }
+        if (player.y > lavaY) gameState = 'gameover';
+
+        camera.x = player.x - canvas.width / 2;
+        camera.y = player.y - canvas.height / 2;
+        if (camera.x < 0) camera.x = 0;
+        if (camera.y > 0) camera.y = 0;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life--;
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+        if (player.invincible > 0) player.invincible--;
+    } else if (gameState === 'win' || gameState === 'gameover') {
+        if (keys['Enter']) {
+            if (gameState === 'win') gameState = 'levelSelect';
+            else gameState = 'menu';
+            keys['Enter'] = false;
+        }
+    }
+}
+
+function createParticles(x, y, color) {
+    for (let i = 0; i < 10; i++) particles.push({ x, y, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6 - 2, life: 30, color });
+}
+
+// ==========================================
+// 4. RENDU (DRAW)
+// ==========================================
+function draw() {
+    ctx.fillStyle = '#1a252f';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (gameState === 'menu') {
+        ctx.fillStyle = '#FFF';
+        ctx.font = '50px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText("NINJAMP", canvas.width/2, 200);
+        
+        ctx.font = '20px "Courier New", monospace';
+        ctx.fillStyle = '#00BCD4';
+        ctx.fillText("Appuie sur ENTRÉE pour jouer", canvas.width/2, 300);
+        
+        let bounce = Math.sin(Date.now() / 200) * 10;
+        
+        // Dessin du joueur statique (Idle)
+        if (assets.playerIdle) {
+            let frameW = assets.playerIdle.width / 4; // On suppose 4 frames d'idle
+            ctx.drawImage(assets.playerIdle, 0, 0, frameW, assets.playerIdle.height, canvas.width/2 - 32, 350 + bounce, 64, 64);
+        }
+    } 
+    else if (gameState === 'levelSelect') {
+        ctx.fillStyle = '#FFF';
+        ctx.font = '24px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText("SÉLECTION DES NIVEAUX", canvas.width/2, 60);
+
+        const cols = 10, rows = 5, btnSize = 50, gap = 10;
+        const startX = (canvas.width - (cols * (btnSize + gap))) / 2 + gap/2;
+        const startY = 120;
+
+        for (let i = 1; i <= 50; i++) {
+            const row = Math.floor((i - 1) / cols);
+            const col = (i - 1) % cols;
+            const bx = startX + col * (btnSize + gap);
+            const by = startY + row * (btnSize + gap);
+
+            // Le fichier bouton de niveau
+            let btnImg = assets[`btnLevel${i}`];
+
+            if (i <= unlockedLevel) {
+                if (btnImg) ctx.drawImage(btnImg, bx, by, btnSize, btnSize);
+            } else {
+                // Si le niveau est verrouillé, on met le bouton en noir (ou on dessine par-dessus)
+                if (btnImg) {
+                    ctx.globalAlpha = 0.3;
+                    ctx.drawImage(btnImg, bx, by, btnSize, btnSize);
+                    ctx.globalAlpha = 1.0;
+                }
+                // Et on peut dessiner un petit cadenas ou crâne ici si on a l'image
+                if(assets.skull) ctx.drawImage(assets.skull, bx + 12, by + 12, 24, 24);
+            }
+
+            if (i === currentLevel) {
+                ctx.strokeStyle = '#4CAF50';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(bx - 2, by - 2, btnSize + 4, btnSize + 4);
+            }
+        }
+
+        ctx.fillStyle = '#FFF';
+        ctx.font = '16px "Courier New", monospace';
+        ctx.fillText("← / → pour choisir, ENTRÉE pour jouer", canvas.width/2, canvas.height - 30);
+    }
+    else if (gameState === 'playing' || gameState === 'win' || gameState === 'gameover') {
+        // UI du jeu
+        ctx.fillStyle = '#FFF';
+        ctx.font = '20px "Courier New", monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Niveau: ${currentLevel} / 50`, 20, 30);
+        
+        if (assets.fruit) ctx.drawImage(assets.fruit, 20, 45, 20, 20);
+        ctx.fillText(` x ${totalFruits}`, 45, 62);
+        
+        const sec = Math.floor(time / 1000);
+        ctx.fillText(`Temps: ${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`, 20, 95);
+
+        ctx.save();
+        ctx.translate(-camera.x, -camera.y);
+
+        // Fond Lave
+        ctx.fillStyle = '#FF5722';
+        ctx.fillRect(0, lavaY, 2000, 200);
+
+        // Plateformes (avec répétition de la tuile 16x16)
+        for (let plat of platforms) {
+            if (assets.tile) {
+                // On boucle pour dessiner la tuile sur toute la largeur
+                for (let x = plat.x; x < plat.x + plat.w; x += 16) {
+                    for (let y = plat.y; y < plat.y + plat.h; y += 16) {
+                        // Si c'est le bord supérieur, on pourrait choisir une tuile "herbe", sinon "terre"
+                        // Ici on dessine tout simplement la tuile en question
+                        ctx.drawImage(assets.tile, 0, 0, 16, 16, x, y, 16, 16);
+                    }
+                }
+            }
+        }
+
+        // Caisses
+        for (let box of boxes) {
+            if (!box.broken && assets.box) {
+                ctx.drawImage(assets.box, 0, 0, 32, 32, box.x, box.y, 32, 32);
+            }
+        }
+
+        // Fruits
+        for (let f of fruits) {
+            if (!f.collected && assets.fruit) ctx.drawImage(assets.fruit, f.x, f.y, 16, 16);
+        }
+
+        // Drapeau
+        if (finishPoint && assets.flag) {
+            ctx.drawImage(assets.flag, finishPoint.x, finishPoint.y, 32, 32);
+        }
+
+        // Joueur (avec découpage de l'image pour l'animation)
+        if (player.invincible % 10 < 5) {
+            let currentImg = assets[`player${player.currentAnim.charAt(0).toUpperCase() + player.currentAnim.slice(1)}`];
+            
+            if (currentImg && currentImg.width > 0) {
+                // Calcul du nombre de frames dans l'image (ex: Run (32x32).png contient 12 frames de 32x32)
+                const frameWidth = 32;
+                const frameHeight = 32;
+                const maxFrames = Math.floor(currentImg.width / frameWidth);
+                
+                // On s'assure que animFrame ne dépasse pas le nombre réel de frames de l'image
+                let currentFrame = player.animFrame % maxFrames; 
+                
+                ctx.save();
+                if (player.facing === -1) {
+                    ctx.translate(player.x + player.w/2, player.y);
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(
+                        currentImg, 
+                        currentFrame * frameWidth, 0, frameWidth, frameHeight, 
+                        -player.w/2, 0, player.w, player.h
+                    );
+                } else {
+                    ctx.drawImage(
+                        currentImg, 
+                        currentFrame * frameWidth, 0, frameWidth, frameHeight, 
+                        player.x, player.y, player.w, player.h
+                    );
+                }
+                ctx.restore();
+            }
+        }
+
+        // Particules
+        for (let p of particles) {
+            ctx.fillStyle = p.color; ctx.globalAlpha = p.life / 30;
+            ctx.fillRect(p.x, p.y, 4, 4);
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+
+        // Écrans de fin
+        if (gameState === 'win' || gameState === 'gameover') {
+            ctx.fillStyle = 'rgba(0,0,0,0.8)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            if (gameState === 'win') {
+                ctx.fillStyle = '#4CAF50';
+                ctx.font = '50px "Courier New", monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText("NIVEAU TERMINÉ !", canvas.width/2, canvas.height/2 - 20);
+            } else {
+                ctx.fillStyle = '#F44336';
+                ctx.font = '50px "Courier New", monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText("GAME OVER", canvas.width/2, canvas.height/2 + 10);
+            }
+            
+            ctx.fillStyle = '#FFF';
+            ctx.font = '20px "Courier New", monospace';
+            ctx.fillText("Appuie sur ENTRÉE pour continuer", canvas.width/2, canvas.height/2 + 80);
+        }
+    }
+}
+
+// ==========================================
+// 5. ENTRÉES CLAVIER
+// ==========================================
+window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => keys[e.key] = false);
+</script>
+</body>
+</html>
